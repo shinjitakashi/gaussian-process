@@ -7,6 +7,10 @@ from scipy.optimize import minimize
 
 class Kernel:
     def __init__(self,param,bound=None):
+        """パラメータをカーネル変数に入れる
+            param (np.array) : ハイパーパラメータ
+            bound (np.array) : ハイパーパラメータの範囲
+        """
         self.param = np.array(param)
         if(bound==None):
             bound = np.zeros([len(param),2])
@@ -134,6 +138,10 @@ class Gausskatei_agent:
             return (xj==xi)
 
     def kernel_matrix_grad(self, xd: np.array) -> np.array:
+        """各ハイパーパラメータに対するカーネル行列の勾配の計算
+        Args:
+            grad_K (np.array) : カーネルの勾配行列(len(xd)×len(xd)×3)
+        """
         self.grad_K = np.zeros((len(xd), len(xd), 3))
         
         for i in range(len(xd)):
@@ -141,35 +149,42 @@ class Gausskatei_agent:
                 for q in range(3):
                     self.grad_K[i][j][q] = self.kgrad(xd[i], xd[j], q)
     
-    def grad_optim(self, xd: np.array, y: np.array) -> np.array: 
+    def grad_optim(self, xd: np.array, y: np.array) -> np.array:
+        """目的関数の勾配
+        Args:
+            KD_00 (np.array) : カーネル行列
+        """
         KD_00 = self.kernel(*np.meshgrid(xd,xd))
-        KD_00_1 = np.linalg.inv(KD_00)
-
+        try:
+            KD_00_1 = np.linalg.inv(KD_00)
+        except np.linalg.LinAlgError as err:
+            if 'Singular matrix' in str(err):
+                print('疑似逆行列つかったよ')
+                KD_00_1 = np.linalg.pinv(KD_00)
+            
         self.kernel_matrix_grad(xd)
         
         self.grad = np.zeros(3)
 
         for d in range(3):
-            self.grad[d] = np.trace(KD_00_1 @ self.grad_K[:,:,d]) - (KD_00_1 @ y).T @ self.grad_K[:,:,d] @ (KD_00_1 @ y)
+            self.grad[d] = -np.trace(KD_00_1 @ self.grad_K[:,:,d]) + (KD_00_1 @ y).T @ self.grad_K[:,:,d] @ (KD_00_1 @ y)
 
-    def saitekika(self,xd: np.array, y: np.array, t: int): # パラメータを調整して学習
+    def saitekika(self,xd: np.array, yd: np.array, t: int): # パラメータを調整して学習
         """ハイパーパラメータの最適化
         x_i(t+1) = x_i(t) + Σp_ij(x_ji(t)-x_ij(t)) - a(t)∇f_i(x_i(t))
 
         Args:
-            xD (np.array)       : エージェントiに与えられるデータセット
-            y (np.array)        : エージェントiに与えられるデータセット
+            xd (np.array)       : エージェントiに与えられる最適化用のデータセット
+            yd (np.array)        : エージェントiに与えられる最適化用のデータセット
             param (np.array)    : パラメータ
             stepsize (float)    : ステップサイズ関数
             grad_f (np.array)   : 勾配(3×1)
             theta (np.array)    : Θ(3×1)
-
-        Return:
-            next_theta (np.array)   : optimization_theta (3×1)
+            x0 (np.array)       : エージェントが保有する予測用のデータセット
         """
         #update
         self.diff = self.theta - self.theta_send
-        self.grad_optim(xd, y)
+        self.grad_optim(xd, yd)
         self.theta_i = self.theta_i + np.dot(self.weight, self.diff) - self.step_size(t, self.stepsize) * self.grad
         #他のAgentとの通信
         self.theta_send[self.name] = self.theta_i
@@ -177,11 +192,16 @@ class Gausskatei_agent:
         #新たなカーネルの更新，カーネル行列の計算
         self.kernel.param = self.theta_i
         self.k00 = self.kernel(*np.meshgrid(x0,x0))
-        self.k00_1 = np.linalg.inv(self.k00)
+        try:
+            self.k00_1 = np.linalg.inv(self.k00)
+        except np.linalg.LinAlgError as err:
+            if 'Singular matrix' in str(err):
+                print('疑似逆行列つかったよ')
+                self.k00_1 = np.linalg.pinv(self.k00)
 
 #Parameters
 #Number of agents
-N = 6
+N = 3
 
 #Number of dimensions of the decision variable
 n = 3
@@ -193,7 +213,7 @@ stepsize = 0.01
 wc = 0.8
 
 #Number of iterations
-iteration = 50
+iteration = 30
 
 # Interval for figure plot 
 fig_interval = 200
@@ -206,12 +226,9 @@ eventtrigger = 0
 # ========================================================================================================================== #
 # Communication Graph
 A = np.array(
-    [[1, 1, 0, 0, 0, 1],
-     [1, 1, 1, 0, 0, 0],
-     [0, 1, 1, 1, 0, 0],
-     [0, 0, 1, 1, 1, 0], 
-     [0, 0, 0, 1, 1, 1],
-     [1, 0, 0, 0, 1, 1]])
+    [[1, 1, 1],
+     [1, 1, 1],
+     [1, 1, 1]])
 
 G = nx.from_numpy_matrix(A)
 
@@ -235,6 +252,7 @@ for i in range(N):
         sum += P[i][j]
     P[i][i] = 1.0 - sum
 
+
 def y(x): # 実際の関数
     return 5*np.sin(np.pi/15*x)*np.exp(-x/50)
 
@@ -242,17 +260,18 @@ def y(x): # 実際の関数
 Kernel_array = []
 Gp_Agent_array = []
 bound = [[1e-2,1e2],[1e-2,1e2],[1e-2,1e2]]
-param0 = [[2,0.4,1.1], [3, 0.3, 1.8], [1.4, 0.5, 2], [3.5, 0.3, 1.9], [1.7, 0.1, 0.8], [1.5, 0.7, 2.2]]
+param0 = [[1.6,4.5,3.4], [2.8, 4.3, 0.6], [2.8, 0.95, 2]]
 find_point = 100 # 既知の点の数
+x0 = np.random.uniform(0,100,find_point) # 既知の点
+y0 = y(x0) + np.random.normal(0,1,find_point)
 for i in range(N):
     np.random.seed(i)
     Kernel_array.append(Kernel(param0[i], bound))
     Gp_Agent_array.append(Gausskatei_agent(Kernel_array[i], N, n, P[i], i, stepsize, eventtrigger))
-    x0 = np.random.uniform(0,200,find_point) # 既知の点
-    y0 = y(x0) + np.random.normal(0,0.5,find_point)
-    Gp_Agent_array[i].x0 = x0
-    Gp_Agent_array[i].y0 = y0
-    Gp_Agent_array[i].gakushuu(Gp_Agent_array[i].x0, Gp_Agent_array[i].y0)
+    Gp_Agent_array[i].xd = np.random.uniform(0, 100, 50) #最適化用のデータセット
+    Gp_Agent_array[i].yd = y(Gp_Agent_array[i].xd) + np.random.normal(0, 1, 50)
+    Gp_Agent_array[i].gakushuu(x0, y0)
+
 
 Agents = copy.deepcopy(Gp_Agent_array)
 
@@ -283,14 +302,14 @@ for t in range(iteration):
 
     #Update the state
     for i in range(N):
-        Agents[i].saitekika(x0, y0, t)
-
+        Agents[i].saitekika(sorted(Agents[i].xd), sorted(Agents[i].yd), t)
+        
 for i in range(N):
     print('Agents{}'.format(i))
     print('a=%.6f, s=%.6f, w=%.6f'%tuple(Agents[i].kernel.param))
 
 plt.figure(figsize=[5,8])
-x1 = np.linspace(0,200,200) 
+x1 = np.linspace(0,100,600) 
 for i in range(N):
     print('Agent {}'.format(i))
     plt.plot(Gp_Agent_array[i].x0, Gp_Agent_array[i].y0, '. ')
